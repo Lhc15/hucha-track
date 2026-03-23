@@ -3,105 +3,95 @@ import { supabase } from '../lib/supabase'
 
 const fmt = n => new Intl.NumberFormat('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n)
 
-function getCurrentMonth() {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-function monthLabel(m) {
-  if (!m) return ''
-  const [y, mo] = m.split('-')
-  const names = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
-  return `${names[parseInt(mo) - 1]} ${y}`
+function fmtDate(d) {
+  if (!d) return ''
+  const date = new Date(d + 'T00:00:00')
+  const names = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+  return `${date.getDate()} ${names[date.getMonth()]} ${date.getFullYear()}`
 }
 
 export default function Hucha({ onLogout }) {
-  const [month, setMonth] = useState(getCurrentMonth())
-  const [monthData, setMonthData] = useState(null)
+  const [hucha, setHucha] = useState(null)
   const [entries, setEntries] = useState([])
   const [name, setName] = useState('')
   const [category, setCategory] = useState('')
   const [amount, setAmount] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [view, setView] = useState('main') // main | history | stats | months
-  const [allMonths, setAllMonths] = useState([])
+  const [view, setView] = useState('main')
+  const [history, setHistory] = useState([])
   const [confirmReset, setConfirmReset] = useState(false)
   const [editIncome, setEditIncome] = useState(false)
   const [incomeInput, setIncomeInput] = useState('')
   const [pulse, setPulse] = useState(null)
 
-  const loadData = useCallback(async (m) => {
+  const loadData = useCallback(async () => {
     setLoading(true)
-    const [{ data: md }, { data: en }] = await Promise.all([
-      supabase.from('months').select('*').eq('month', m).single(),
-      supabase.from('entries').select('*').eq('month', m).order('created_at', { ascending: false })
+    const [{ data: h }, { data: en }, { data: hist }] = await Promise.all([
+      supabase.from('hucha').select('*').single(),
+      supabase.from('entries').select('*').order('created_at', { ascending: false }),
+      supabase.from('hucha_history').select('*').order('ended_at', { ascending: false })
     ])
-    setMonthData(md || { month: m, income: 0, label: monthLabel(m) })
+    setHucha(h)
     setEntries(en || [])
+    setHistory(hist || [])
     setLoading(false)
   }, [])
 
-  const loadAllMonths = useCallback(async () => {
-    const { data } = await supabase.from('months').select('*').order('month', { ascending: false })
-    setAllMonths(data || [])
-  }, [])
-
-  useEffect(() => { loadData(month) }, [month, loadData])
-  useEffect(() => { loadAllMonths() }, [loadAllMonths])
+  useEffect(() => { loadData() }, [loadData])
 
   const totalSpent = entries.filter(e => e.type === 'expense').reduce((s, e) => s + Number(e.amount), 0)
-  const totalAdded = entries.filter(e => e.type === 'income').reduce((s, e) => s + Number(e.amount), 0)
-  const income = monthData?.income || 0
-  const balance = income + totalAdded - totalSpent
-  const disponible = balance
-
-  async function ensureMonth() {
-    const { data } = await supabase.from('months').select('id').eq('month', month).single()
-    if (!data) {
-      await supabase.from('months').insert({ month, income: 0, label: monthLabel(month) })
-    }
-  }
+  const income = hucha?.income || 0
+  const disponible = income - totalSpent
 
   async function addEntry(type) {
     const amt = parseFloat(amount.replace(',', '.'))
     if (!name.trim() || isNaN(amt) || amt <= 0) return
     setSaving(true)
-    await ensureMonth()
     await supabase.from('entries').insert({
       name: name.trim(),
       category: category.trim() || null,
       amount: amt,
-      type,
-      month
+      type
     })
     setPulse(type)
     setTimeout(() => setPulse(null), 600)
     setName(''); setCategory(''); setAmount('')
-    await loadData(month)
+    await loadData()
     setSaving(false)
   }
 
   async function deleteEntry(id) {
     await supabase.from('entries').delete().eq('id', id)
-    await loadData(month)
+    await loadData()
   }
 
   async function saveIncome() {
     const val = parseFloat(incomeInput.replace(',', '.'))
     if (isNaN(val)) return
-    await ensureMonth()
-    await supabase.from('months').upsert({ month, income: val, label: monthLabel(month) }, { onConflict: 'month' })
+    await supabase.from('hucha').update({ income: val }).eq('id', hucha.id)
     setEditIncome(false)
-    await loadData(month)
-    await loadAllMonths()
+    await loadData()
   }
 
-  async function resetMonth() {
-    await supabase.from('entries').delete().eq('month', month)
-    await supabase.from('months').upsert({ month, income: 0, label: monthLabel(month) }, { onConflict: 'month' })
+  async function resetHucha() {
+    // Guardar histórico
+    const snapshot = entries.map(e => ({ name: e.name, category: e.category, amount: e.amount, type: e.type }))
+    await supabase.from('hucha_history').insert({
+      started_at: hucha.started_at,
+      ended_at: new Date().toISOString().slice(0, 10),
+      income: hucha.income,
+      total_spent: totalSpent,
+      snapshot
+    })
+    // Borrar entries y resetear hucha
+    await supabase.from('entries').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+    await supabase.from('hucha').update({
+      started_at: new Date().toISOString().slice(0, 10),
+      income: 0
+    }).eq('id', hucha.id)
     setConfirmReset(false)
-    await loadData(month)
+    await loadData()
   }
 
   const byCategory = entries.filter(e => e.type === 'expense').reduce((acc, e) => {
@@ -123,34 +113,29 @@ export default function Hucha({ onLogout }) {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 20px 0' }}>
         <h1 style={{ fontFamily: 'DM Serif Display', fontSize: 26, fontWeight: 400 }}>🪙 Hucha</h1>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <button onClick={() => { setView(view === 'months' ? 'main' : 'months') }} style={{ background: 'none', fontSize: 20, padding: 4 }}>📅</button>
+          <button onClick={() => setView(view === 'historial' ? 'main' : 'historial')} style={{ background: 'none', fontSize: 20, padding: 4 }}>📅</button>
           <button onClick={onLogout} style={{ background: 'none', color: 'var(--ink-muted)', fontSize: 13, padding: '6px 10px', border: '1px solid var(--border)', borderRadius: 8 }}>Salir</button>
         </div>
       </div>
 
-      {/* Month selector */}
-      <div style={{ padding: '10px 20px 0', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 13, color: 'var(--ink-soft)', fontWeight: 500 }}>{monthLabel(month)}</span>
-        <input type="month" value={month} onChange={e => setMonth(e.target.value)}
-          style={{ border: 'none', background: 'none', fontSize: 13, color: 'var(--ink-muted)', cursor: 'pointer', width: 'auto', padding: 0 }} />
+      {/* Fecha inicio */}
+      <div style={{ padding: '8px 20px 0' }}>
+        <span style={{ fontSize: 12, color: 'var(--ink-muted)' }}>Desde el {fmtDate(hucha?.started_at)}</span>
       </div>
 
       {/* HUCHA card */}
-      <div style={{ margin: '16px 20px 0', padding: '28px 24px 0', background: 'var(--warm-white)', borderRadius: 24, border: '1px solid var(--border)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden' }}>
+      <div style={{ margin: '14px 20px 0', padding: '28px 24px 0', background: 'var(--warm-white)', borderRadius: 24, border: '1px solid var(--border)', boxShadow: 'var(--shadow-lg)', overflow: 'hidden' }}>
         <p style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Lo que llevo gastado</p>
         <div style={{
-          fontSize: 64,
-          fontFamily: 'DM Serif Display',
-          fontWeight: 400,
-          lineHeight: 1,
-          color: totalSpent > income ? 'var(--red)' : 'var(--ink)',
+          fontSize: 64, fontFamily: 'DM Serif Display', fontWeight: 400, lineHeight: 1,
+          color: income > 0 && totalSpent > income ? 'var(--red)' : 'var(--ink)',
           transition: 'color 0.3s',
           animation: pulse ? `${pulse === 'expense' ? 'bumpRed' : 'bumpGreen'} 0.5s ease` : 'none'
         }}>
           {fmt(totalSpent)}€
         </div>
         <p style={{ fontSize: 13, color: 'var(--ink-muted)', marginTop: 6 }}>
-          {entries.filter(e => e.type === 'expense').length} gastos este mes
+          {entries.filter(e => e.type === 'expense').length} gastos registrados
         </p>
 
         {/* Footer stripe */}
@@ -186,23 +171,19 @@ export default function Hucha({ onLogout }) {
           <button onClick={() => addEntry('income')} disabled={saving} style={{
             background: 'var(--green-btn)', color: 'white', padding: '18px', borderRadius: 'var(--radius-sm)',
             fontSize: 16, fontWeight: 500, opacity: saving ? 0.6 : 1
-          }}>
-            + Añades
-          </button>
+          }}>+ Añades</button>
           <button onClick={() => addEntry('expense')} disabled={saving} style={{
             background: 'var(--red-btn)', color: 'white', padding: '18px', borderRadius: 'var(--radius-sm)',
             fontSize: 16, fontWeight: 500, opacity: saving ? 0.6 : 1
-          }}>
-            − Gastas
-          </button>
+          }}>− Gastas</button>
         </div>
       </div>
 
-      {/* Toggle list */}
+      {/* Views */}
       <div style={{ margin: '28px 20px 0' }}>
         <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
           {['main','stats'].map(v => (
-            <button key={v} onClick={() => setView(view === v ? 'list' : v)} style={{
+            <button key={v} onClick={() => setView(view === v ? 'off' : v)} style={{
               padding: '8px 16px', borderRadius: 20, fontSize: 13, fontWeight: 500,
               background: view === v ? 'var(--ink)' : 'var(--warm-white)',
               color: view === v ? 'white' : 'var(--ink-soft)',
@@ -213,10 +194,9 @@ export default function Hucha({ onLogout }) {
           ))}
         </div>
 
-        {/* Entries list */}
-        {(view === 'main' || view === 'list') && (
+        {view === 'main' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {entries.length === 0 && <p style={{ color: 'var(--ink-muted)', fontSize: 14, textAlign: 'center', padding: '20px 0' }}>Sin movimientos este mes</p>}
+            {entries.length === 0 && <p style={{ color: 'var(--ink-muted)', fontSize: 14, textAlign: 'center', padding: '20px 0' }}>Sin movimientos todavía</p>}
             {entries.map(e => (
               <div key={e.id} style={{
                 background: 'var(--warm-white)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)',
@@ -238,10 +218,9 @@ export default function Hucha({ onLogout }) {
           </div>
         )}
 
-        {/* Stats by category */}
         {view === 'stats' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {Object.keys(byCategory).length === 0 && <p style={{ color: 'var(--ink-muted)', fontSize: 14, textAlign: 'center', padding: '20px 0' }}>Sin datos de categorías</p>}
+            {Object.keys(byCategory).length === 0 && <p style={{ color: 'var(--ink-muted)', fontSize: 14, textAlign: 'center', padding: '20px 0' }}>Sin datos todavía</p>}
             {Object.entries(byCategory).sort((a,b) => b[1]-a[1]).map(([cat, amt]) => (
               <div key={cat} style={{ background: 'var(--warm-white)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', padding: '14px 16px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -257,52 +236,49 @@ export default function Hucha({ onLogout }) {
           </div>
         )}
 
-        {/* Months history */}
-        {view === 'months' && (
+        {view === 'historial' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <p style={{ fontSize: 13, color: 'var(--ink-muted)', marginBottom: 4 }}>Historial de meses</p>
-            {allMonths.map(m => (
-              <button key={m.month} onClick={() => { setMonth(m.month); setView('main') }} style={{
-                background: m.month === month ? 'var(--ink)' : 'var(--warm-white)',
-                color: m.month === month ? 'white' : 'var(--ink)',
-                borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)',
-                padding: '14px 16px', textAlign: 'left', fontSize: 15, fontWeight: 500
-              }}>
-                {monthLabel(m.month)} — {fmt(m.income)}€ cobrados
-              </button>
+            <p style={{ fontSize: 13, color: 'var(--ink-muted)', marginBottom: 4 }}>Huchas anteriores</p>
+            {history.length === 0 && <p style={{ color: 'var(--ink-muted)', fontSize: 14, textAlign: 'center', padding: '20px 0' }}>Todavía no has reiniciado ninguna hucha</p>}
+            {history.map(h => (
+              <div key={h.id} style={{ background: 'var(--warm-white)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', padding: '14px 16px' }}>
+                <p style={{ fontWeight: 500, fontSize: 14 }}>{fmtDate(h.started_at)} → {fmtDate(h.ended_at)}</p>
+                <div style={{ display: 'flex', gap: 16, marginTop: 6 }}>
+                  <span style={{ fontSize: 13, color: 'var(--green)' }}>Cobrado: {fmt(h.income)}€</span>
+                  <span style={{ fontSize: 13, color: 'var(--red)' }}>Gastado: {fmt(h.total_spent)}€</span>
+                </div>
+                <p style={{ fontSize: 12, color: disponible < 0 ? 'var(--red)' : 'var(--ink-muted)', marginTop: 4 }}>
+                  Saldo: {fmt(h.income - h.total_spent)}€
+                </p>
+              </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* Bottom actions */}
-      <div style={{ margin: '32px 20px 0', borderTop: '1px solid var(--border)', paddingTop: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Reset */}
+      <div style={{ margin: '32px 20px 0', borderTop: '1px solid var(--border)', paddingTop: 20 }}>
         {!confirmReset ? (
           <button onClick={() => setConfirmReset(true)} style={{
-            background: 'none', border: '1px solid var(--border)', color: 'var(--ink-muted)',
+            width: '100%', background: 'none', border: '1px solid var(--border)', color: 'var(--ink-muted)',
             padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: 14
-          }}>
-            Reiniciar hucha del mes
-          </button>
+          }}>Reiniciar hucha</button>
         ) : (
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={resetMonth} style={{ flex: 1, background: 'var(--red-btn)', color: 'white', padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: 14 }}>Sí, reiniciar</button>
-            <button onClick={() => setConfirmReset(false)} style={{ flex: 1, background: 'var(--warm-white)', border: '1px solid var(--border)', color: 'var(--ink)', padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: 14 }}>Cancelar</button>
+          <div>
+            <p style={{ fontSize: 13, color: 'var(--ink-soft)', marginBottom: 10, textAlign: 'center' }}>
+              Se guardará en el historial y empezará una hucha nueva desde hoy.
+            </p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={resetHucha} style={{ flex: 1, background: 'var(--red-btn)', color: 'white', padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: 14 }}>Sí, reiniciar</button>
+              <button onClick={() => setConfirmReset(false)} style={{ flex: 1, background: 'var(--warm-white)', border: '1px solid var(--border)', color: 'var(--ink)', padding: '12px', borderRadius: 'var(--radius-sm)', fontSize: 14 }}>Cancelar</button>
+            </div>
           </div>
         )}
       </div>
 
       <style>{`
-        @keyframes bumpRed {
-          0% { transform: scale(1); }
-          40% { transform: scale(1.04); color: var(--red); }
-          100% { transform: scale(1); }
-        }
-        @keyframes bumpGreen {
-          0% { transform: scale(1); }
-          40% { transform: scale(1.04); color: var(--green); }
-          100% { transform: scale(1); }
-        }
+        @keyframes bumpRed { 0%,100% { transform: scale(1); } 40% { transform: scale(1.04); } }
+        @keyframes bumpGreen { 0%,100% { transform: scale(1); } 40% { transform: scale(1.04); } }
       `}</style>
     </div>
   )

@@ -23,4 +23,3 @@ Para cambiarla: edita la constante `PASSWORD` en `src/components/Login.jsx`.
 npm install
 npm run dev
 ```
-# hucha-track
